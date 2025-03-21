@@ -83,7 +83,7 @@ func TestBaseBindsReaderToString(t *testing.T) {
 	}
 }
 
-func TestBaseBindsToString(t *testing.T) {
+func TestBaseBindsToStringAndToBytes(t *testing.T) {
 	vm := goja.New()
 	baseBinds(vm)
 	vm.Set("scenarios", []struct {
@@ -1137,6 +1137,65 @@ func TestLoadingDynamicModel(t *testing.T) {
 	}
 }
 
+func TestDynamicModelMapFieldCaching(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	vm := goja.New()
+	baseBinds(vm)
+	dbxBinds(vm)
+	vm.Set("$app", app)
+
+	_, err := vm.RunString(`
+		let m1 = new DynamicModel({
+			int: 0,
+			float: -0,
+			text: "",
+			bool: false,
+			obj: {},
+			arr: [],
+		})
+
+		let m2 = new DynamicModel({
+			int: 0,
+			float: -0,
+			text: "",
+			bool: false,
+			obj: {},
+			arr: [],
+		})
+
+		m1.int = 1
+		m1.float = 1.5
+		m1.text = "a"
+		m1.bool = true
+		m1.obj.set("a", 1)
+		m1.arr.push(1)
+
+		m2.int = 2
+		m2.float = 2.5
+		m2.text = "b"
+		m2.bool = false
+		m2.obj.set("b", 1)
+		m2.arr.push(2)
+
+		let m1Expected = '{"arr":[1],"bool":true,"float":1.5,"int":1,"obj":{"a":1},"text":"a"}';
+		let m1Serialized = JSON.stringify(m1);
+		if (m1Serialized != m1Expected) {
+			throw new Error("Expected m1 \n" + m1Expected + "\ngot\n" + m1Serialized);
+		}
+
+		let m2Expected = '{"arr":[2],"bool":false,"float":2.5,"int":2,"obj":{"b":1},"text":"b"}';
+		let m2Serialized = JSON.stringify(m2);
+		if (m2Serialized != m2Expected) {
+			throw new Error("Expected m2 \n" + m2Expected + "\ngot\n" + m2Serialized);
+		}
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadingArrayOf(t *testing.T) {
 	app, _ := tests.NewTestApp()
 	defer app.Cleanup()
@@ -1379,7 +1438,7 @@ func TestCronBindsCount(t *testing.T) {
 	testBindsCount(vm, "this", 2, t)
 
 	pool.run(func(poolVM *goja.Runtime) error {
-		testBindsCount(poolVM, "this", 1, t)
+		testBindsCount(poolVM, "this", 2, t)
 		return nil
 	})
 }
@@ -1538,13 +1597,14 @@ func TestRouterBinds(t *testing.T) {
 	defer app.Cleanup()
 
 	result := &struct {
-		AddCount  int
-		WithCount int
+		RouteMiddlewareCalls  int
+		GlobalMiddlewareCalls int
 	}{}
 
 	vmFactory := func() *goja.Runtime {
 		vm := goja.New()
 		baseBinds(vm)
+		apisBinds(vm)
 		vm.Set("$app", app)
 		vm.Set("result", result)
 		return vm
@@ -1557,14 +1617,20 @@ func TestRouterBinds(t *testing.T) {
 
 	_, err := vm.RunString(`
 		routerAdd("GET", "/test", (e) => {
-			result.addCount++;
+			result.routeMiddlewareCalls++;
 		}, (e) => {
-			result.addCount++;
+			result.routeMiddlewareCalls++;
 			return e.next();
 		})
 
+		// Promise is not technically supported as return result
+		// but we try to resolve it at least for thrown errors
+		routerAdd("GET", "/error", async (e) => {
+			throw new ApiError(456, 'test', null)
+		})
+
 		routerUse((e) => {
-			result.withCount++;
+			result.globalMiddlewareCalls++;
 
 			return e.next();
 		})
@@ -1585,21 +1651,44 @@ func TestRouterBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-
 	mux, err := serveEvent.Router.BuildMux()
 	if err != nil {
 		t.Fatalf("Failed to build router mux: %v", err)
 	}
-	mux.ServeHTTP(rec, req)
 
-	if result.AddCount != 2 {
-		t.Fatalf("Expected AddCount %d, got %d", 2, result.AddCount)
+	scenarios := []struct {
+		method                        string
+		path                          string
+		expectedRouteMiddlewareCalls  int
+		expectedGlobalMiddlewareCalls int
+		expectedCode                  int
+	}{
+		{"GET", "/test", 2, 1, 200},
+		{"GET", "/error", 0, 1, 456},
 	}
 
-	if result.WithCount != 1 {
-		t.Fatalf("Expected WithCount %d, got %d", 1, result.WithCount)
+	for _, s := range scenarios {
+		t.Run(s.method+" "+s.path, func(t *testing.T) {
+			// reset
+			result.RouteMiddlewareCalls = 0
+			result.GlobalMiddlewareCalls = 0
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(s.method, s.path, nil)
+			mux.ServeHTTP(rec, req)
+
+			if result.RouteMiddlewareCalls != s.expectedRouteMiddlewareCalls {
+				t.Fatalf("Expected RouteMiddlewareCalls %d, got %d", s.expectedRouteMiddlewareCalls, result.RouteMiddlewareCalls)
+			}
+
+			if result.GlobalMiddlewareCalls != s.expectedGlobalMiddlewareCalls {
+				t.Fatalf("Expected GlobalMiddlewareCalls %d, got %d", s.expectedGlobalMiddlewareCalls, result.GlobalMiddlewareCalls)
+			}
+
+			if rec.Code != s.expectedCode {
+				t.Fatalf("Expected status code %d, got %d", s.expectedCode, rec.Code)
+			}
+		})
 	}
 }
 
@@ -1614,5 +1703,5 @@ func TestOsBindsCount(t *testing.T) {
 	vm := goja.New()
 	osBinds(vm)
 
-	testBindsCount(vm, "$os", 17, t)
+	testBindsCount(vm, "$os", 18, t)
 }

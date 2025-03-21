@@ -175,6 +175,20 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				if err := app.Save(ea); err != nil {
 					t.Fatal(err)
 				}
+
+				// test at least once that the correct request info context is properly loaded
+				app.OnRecordAuthRequest().BindFunc(func(e *core.RecordAuthRequestEvent) error {
+					info, err := e.RequestInfo()
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if info.Context != core.RequestInfoContextOAuth2 {
+						t.Fatalf("Expected request context %q, got %q", core.RequestInfoContextOAuth2, info.Context)
+					}
+
+					return e.Next()
+				})
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
@@ -293,6 +307,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":false`,
 				`"email":"test2@example.com"`,
 				`"id":"oap640cot4yru2s"`,
 				`"id":"test_id"`,
@@ -384,6 +399,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":false`,
 				`"email":"test@example.com"`,
 				`"id":"4q1xlclmfloku33"`,
 				`"id":"test_id"`,
@@ -489,6 +505,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":false`,
 				`"email":"test@example.com"`,
 				`"id":"4q1xlclmfloku33"`,
 				`"id":"test_id"`,
@@ -602,6 +619,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":false`,
 				`"email":"test_oauth2@example.com"`,
 				`"id":"4q1xlclmfloku33"`,
 				`"id":"test_id"`,
@@ -707,6 +725,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":false`,
 				`"email":"test@example.com"`,
 				`"id":"4q1xlclmfloku33"`,
 				`"id":"test_id"`,
@@ -796,6 +815,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"record":{`,
 				`"token":"`,
 				`"meta":{`,
+				`"isNew":true`,
 				`"email":""`,
 				`"id":"test_id"`,
 				`"verified":true`,
@@ -877,7 +897,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				`"verified":{"code":"validation_values_mismatch"`,
 			},
 			NotExpectedContent: []string{
-				`"email":`, // the value is always overwritten with the OAuth2 user email
+				`"email":`, // ignored because the record validator never ran
 				`"rel":`,   // ignored because the record validator never ran
 				`"file":`,  // ignored because the record validator never ran
 			},
@@ -930,11 +950,9 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			ExpectedStatus: 400,
 			ExpectedContent: []string{
 				`"data":{`,
+				`"email":{"code":"validation_is_email"`,
 				`"rel":{"code":"validation_missing_rel_records"`,
 				`"file":{"code":"validation_invalid_file"`,
-			},
-			NotExpectedContent: []string{
-				`"email":`, // the value is always overwritten with the OAuth2 user email
 			},
 			ExpectedEvents: map[string]int{
 				"*":                             0,
@@ -949,7 +967,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 		},
 		{
-			Name:   "creating user (valid create data)",
+			Name:   "creating user (valid create data with empty submitted email)",
 			Method: http.MethodPost,
 			URL:    "/api/collections/users/auth-with-oauth2",
 			Body: strings.NewReader(`{
@@ -957,7 +975,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				"code":"123",
 				"redirectURL": "https://example.com",
 				"createData": {
-					"email": "invalid",
+					"email": "",
 					"emailVisibility": true,
 					"password": "1234567890",
 					"passwordConfirm": "1234567890",
@@ -994,6 +1012,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":""`,
 				`"emailVisibility":true`,
 				`"name":"test_name"`,
@@ -1029,6 +1048,95 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 				// ---
 				"OnModelValidate":  4,
 				"OnRecordValidate": 4,
+			},
+			AfterTestFunc: func(t testing.TB, app *tests.TestApp, res *http.Response) {
+				user, err := app.FindFirstRecordByData("users", "username", "test_username")
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if !user.ValidatePassword("1234567890") {
+					t.Fatalf("Expected password %q to be valid", "1234567890")
+				}
+			},
+		},
+		{
+			Name:   "creating user (valid create data with non-empty valid submitted email)",
+			Method: http.MethodPost,
+			URL:    "/api/collections/users/auth-with-oauth2",
+			Body: strings.NewReader(`{
+				"provider": "test",
+				"code":"123",
+				"redirectURL": "https://example.com",
+				"createData": {
+					"email": "test_create@example.com",
+					"emailVisibility": true,
+					"password": "1234567890",
+					"passwordConfirm": "1234567890",
+					"name": "test_name",
+					"username": "test_username",
+					"rel": "0yxhwia2amd8gec"
+				}
+			}`),
+			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+				usersCol, err := app.FindCollectionByNameOrId("users")
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// register the test provider
+				auth.Providers["test"] = func() auth.Provider {
+					return &oauth2MockProvider{
+						AuthUser: &auth.AuthUser{
+							Id:    "test_id",
+							Email: "oauth2@example.com", // should be ignored because of the explicit submitted email
+						},
+						Token: &oauth2.Token{AccessToken: "abc"},
+					}
+				}
+
+				// add the test provider in the collection
+				usersCol.MFA.Enabled = false
+				usersCol.OAuth2.Enabled = true
+				usersCol.OAuth2.Providers = []core.OAuth2ProviderConfig{{
+					Name:         "test",
+					ClientId:     "123",
+					ClientSecret: "456",
+				}}
+				if err := app.Save(usersCol); err != nil {
+					t.Fatal(err)
+				}
+			},
+			ExpectedStatus: 200,
+			ExpectedContent: []string{
+				`"email":"test_create@example.com"`,
+				`"emailVisibility":true`,
+				`"name":"test_name"`,
+				`"username":"test_username"`,
+				`"verified":false`,
+				`"rel":"0yxhwia2amd8gec"`,
+			},
+			NotExpectedContent: []string{
+				// hidden fields
+				`"tokenKey"`,
+				`"password"`,
+			},
+			ExpectedEvents: map[string]int{
+				"*":                             0,
+				"OnRecordAuthWithOAuth2Request": 1,
+				"OnRecordAuthRequest":           1,
+				"OnRecordCreateRequest":         1,
+				"OnRecordEnrich":                2, // the auth response and from the create request
+				// ---
+				"OnModelCreate":              3, // record + authOrigins + externalAuths
+				"OnModelCreateExecute":       3,
+				"OnModelAfterCreateSuccess":  3,
+				"OnRecordCreate":             3,
+				"OnRecordCreateExecute":      3,
+				"OnRecordAfterCreateSuccess": 3,
+				// ---
+				"OnModelValidate":  3,
+				"OnRecordValidate": 3,
 			},
 			AfterTestFunc: func(t testing.TB, app *tests.TestApp, res *http.Response) {
 				user, err := app.FindFirstRecordByData("users", "username", "test_username")
@@ -1093,6 +1201,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":"oauth2@example.com"`,
 				`"emailVisibility":true`,
 				`"name":"test_name"`,
@@ -1175,6 +1284,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":"oauth2@example.com"`,
 				`"emailVisibility":false`,
 				`"verified":true`,
@@ -1257,6 +1367,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":"oauth2@example.com"`,
 				`"emailVisibility":false`,
 				`"username":"tESt2_username"`,
@@ -1347,6 +1458,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":"oauth2@example.com"`,
 				`"emailVisibility":false`,
 				`"verified":true`,
@@ -1428,6 +1540,7 @@ func TestRecordAuthWithOAuth2(t *testing.T) {
 			},
 			ExpectedStatus: 200,
 			ExpectedContent: []string{
+				`"isNew":true`,
 				`"email":"oauth2@example.com"`,
 				`"emailVisibility":false`,
 				`"verified":true`,

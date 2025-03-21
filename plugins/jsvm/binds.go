@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -82,11 +83,9 @@ func hooksBinds(app core.App, loader *goja.Runtime, executors *vmsPool) {
 					res, err := executor.RunProgram(pr)
 					executor.Set("__args", goja.Undefined())
 
-					// (legacy) check for returned Go error value
-					if res != nil {
-						if resErr, ok := res.Export().(error); ok {
-							return resErr
-						}
+					// check for returned Go error value
+					if resErr := checkGojaValueForError(app, res); resErr != nil {
+						return resErr
 					}
 
 					return normalizeException(err)
@@ -102,7 +101,7 @@ func hooksBinds(app core.App, loader *goja.Runtime, executors *vmsPool) {
 }
 
 func cronBinds(app core.App, loader *goja.Runtime, executors *vmsPool) {
-	loader.Set("cronAdd", func(jobId, cronExpr, handler string) {
+	cronAdd := func(jobId, cronExpr, handler string) {
 		pr := goja.MustCompile(defaultScriptPath, "{("+handler+").apply(undefined)}", true)
 
 		err := app.Cron().Add(jobId, cronExpr, func() {
@@ -122,28 +121,27 @@ func cronBinds(app core.App, loader *goja.Runtime, executors *vmsPool) {
 		if err != nil {
 			panic("[cronAdd] failed to register cron job " + jobId + ": " + err.Error())
 		}
-	})
+	}
+	loader.Set("cronAdd", cronAdd)
 
-	// note: it is not necessary needed but it is here for consistency
-	loader.Set("cronRemove", func(jobId string) {
+	cronRemove := func(jobId string) {
 		app.Cron().Remove(jobId)
-	})
+	}
+	loader.Set("cronRemove", cronRemove)
 
 	// register the removal helper also in the executors to allow removing cron jobs from everywhere
 	oldFactory := executors.factory
 	executors.factory = func() *goja.Runtime {
 		vm := oldFactory()
 
-		vm.Set("cronRemove", func(jobId string) {
-			app.Cron().Remove(jobId)
-		})
+		vm.Set("cronAdd", cronAdd)
+		vm.Set("cronRemove", cronRemove)
 
 		return vm
 	}
 	for _, item := range executors.items {
-		item.vm.Set("cronRemove", func(jobId string) {
-			app.Cron().Remove(jobId)
-		})
+		item.vm.Set("cronAdd", cronAdd)
+		item.vm.Set("cronRemove", cronRemove)
 	}
 }
 
@@ -198,11 +196,9 @@ func wrapHandlerFunc(executors *vmsPool, handler goja.Value) (func(*core.Request
 				res, err := executor.RunProgram(pr)
 				executor.Set("__args", goja.Undefined())
 
-				// (legacy) check for returned Go error value
-				if res != nil {
-					if v, ok := res.Export().(error); ok {
-						return v
-					}
+				// check for returned Go error value
+				if resErr := checkGojaValueForError(e.App, res); resErr != nil {
+					return resErr
 				}
 
 				return normalizeException(err)
@@ -255,11 +251,9 @@ func wrapMiddlewares(executors *vmsPool, rawMiddlewares ...goja.Value) ([]*hook.
 						res, err := executor.RunProgram(pr)
 						executor.Set("__args", goja.Undefined())
 
-						// (legacy) check for returned Go error value
-						if res != nil {
-							if v, ok := res.Export().(error); ok {
-								return v
-							}
+						// check for returned Go error value
+						if resErr := checkGojaValueForError(e.App, res); resErr != nil {
+							return resErr
 						}
 
 						return normalizeException(err)
@@ -277,11 +271,9 @@ func wrapMiddlewares(executors *vmsPool, rawMiddlewares ...goja.Value) ([]*hook.
 						res, err := executor.RunProgram(pr)
 						executor.Set("__args", goja.Undefined())
 
-						// (legacy) check for returned Go error value
-						if res != nil {
-							if v, ok := res.Export().(error); ok {
-								return v
-							}
+						// check for returned Go error value
+						if resErr := checkGojaValueForError(e.App, res); resErr != nil {
+							return resErr
 						}
 
 						return normalizeException(err)
@@ -715,6 +707,7 @@ func osBinds(vm *goja.Runtime) {
 	obj.Set("exit", os.Exit)
 	obj.Set("getenv", os.Getenv)
 	obj.Set("dirFS", os.DirFS)
+	obj.Set("stat", os.Stat)
 	obj.Set("readFile", os.ReadFile)
 	obj.Set("writeFile", os.WriteFile)
 	obj.Set("readDir", os.ReadDir)
@@ -918,6 +911,29 @@ func httpClientBinds(vm *goja.Runtime) {
 
 // -------------------------------------------------------------------
 
+// checkGojaValueForError resolves the provided goja.Value and tries
+// to extract its underlying error value (if any).
+func checkGojaValueForError(app core.App, value goja.Value) error {
+	if value == nil {
+		return nil
+	}
+
+	exported := value.Export()
+	switch v := exported.(type) {
+	case error:
+		return v
+	case *goja.Promise:
+		// Promise as return result is not officially supported but try to
+		// resolve any thrown exception to avoid silently ignoring it
+		app.Logger().Warn("the handler must a non-async function and not return a Promise")
+		if promiseErr, ok := v.Result().Export().(error); ok {
+			return normalizeException(promiseErr)
+		}
+	}
+
+	return nil
+}
+
 // normalizeException checks if the provided error is a goja.Exception
 // and attempts to return its underlying Go error.
 //
@@ -1019,10 +1035,18 @@ func structConstructorUnmarshal(vm *goja.Runtime, call goja.ConstructorCall, ins
 	return instanceValue
 }
 
-var cachedDynamicModels = store.New[string, *dynamicModelType](nil)
+var cachedDynamicModelStructs = store.New[string, reflect.Type](nil)
 
 // newDynamicModel creates a new dynamic struct with fields based
 // on the specified "shape".
+//
+// The "shape" values are used as defaults and could be of type:
+// - int (ex. 0)
+// - float (ex. -0)
+// - string (ex. "")
+// - bool (ex. false)
+// - slice (ex. [])
+// - map (ex. map[string]any{})
 //
 // Example:
 //
@@ -1031,46 +1055,21 @@ var cachedDynamicModels = store.New[string, *dynamicModelType](nil)
 //		"total": 0,
 //	})
 func newDynamicModel(shape map[string]any) any {
-	var modelType *dynamicModelType
+	info := make([]*shapeFieldInfo, 0, len(shape))
 
-	shapeRaw, err := json.Marshal(shape)
-	if err != nil {
-		modelType = getDynamicModelStruct(shape)
-	} else {
-		modelType = cachedDynamicModels.GetOrSet(string(shapeRaw), func() *dynamicModelType {
-			return getDynamicModelStruct(shape)
-		})
+	var hash strings.Builder
+
+	sortedKeys := make([]string, 0, len(shape))
+	for k := range shape {
+		sortedKeys = append(sortedKeys, k)
 	}
+	sort.Strings(sortedKeys)
 
-	rvShapeValues := make([]reflect.Value, len(modelType.shapeValues))
-	for i, v := range modelType.shapeValues {
-		rvShapeValues[i] = reflect.ValueOf(v)
-	}
-
-	elem := reflect.New(modelType.structType).Elem()
-
-	for i, v := range rvShapeValues {
-		elem.Field(i).Set(v)
-	}
-
-	return elem.Addr().Interface()
-}
-
-type dynamicModelType struct {
-	structType  reflect.Type
-	shapeValues []any
-}
-
-func getDynamicModelStruct(shape map[string]any) *dynamicModelType {
-	result := new(dynamicModelType)
-	result.shapeValues = make([]any, 0, len(shape))
-
-	structFields := make([]reflect.StructField, 0, len(shape))
-
-	for k, v := range shape {
+	for _, k := range sortedKeys {
+		v := shape[k]
 		vt := reflect.TypeOf(v)
 
-		switch kind := vt.Kind(); kind {
+		switch vt.Kind() {
 		case reflect.Map:
 			raw, _ := json.Marshal(v)
 			newV := types.JSONMap[any]{}
@@ -1085,16 +1084,40 @@ func getDynamicModelStruct(shape map[string]any) *dynamicModelType {
 			vt = reflect.TypeOf(newV)
 		}
 
-		result.shapeValues = append(result.shapeValues, v)
+		hash.WriteString(k)
+		hash.WriteString(":")
+		hash.WriteString(vt.String()) // it doesn't guarantee to be unique across all types but it should be fine with the primitive types DynamicModel is used
+		hash.WriteString("|")
 
-		structFields = append(structFields, reflect.StructField{
-			Name: inflector.UcFirst(k), // ensures that the field is exportable
-			Type: vt,
-			Tag:  reflect.StructTag(`db:"` + k + `" json:"` + k + `" form:"` + k + `"`),
-		})
+		info = append(info, &shapeFieldInfo{key: k, value: v, valueType: vt})
 	}
 
-	result.structType = reflect.StructOf(structFields)
+	st := cachedDynamicModelStructs.GetOrSet(hash.String(), func() reflect.Type {
+		structFields := make([]reflect.StructField, len(info))
 
-	return result
+		for i, item := range info {
+			structFields[i] = reflect.StructField{
+				Name: inflector.UcFirst(item.key), // ensures that the field is exportable
+				Type: item.valueType,
+				Tag:  reflect.StructTag(`db:"` + item.key + `" json:"` + item.key + `" form:"` + item.key + `"`),
+			}
+		}
+
+		return reflect.StructOf(structFields)
+	})
+
+	elem := reflect.New(st).Elem()
+
+	// load default values into the new model
+	for i, item := range info {
+		elem.Field(i).Set(reflect.ValueOf(item.value))
+	}
+
+	return elem.Addr().Interface()
+}
+
+type shapeFieldInfo struct {
+	value     any
+	valueType reflect.Type
+	key       string
 }

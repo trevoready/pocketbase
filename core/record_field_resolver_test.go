@@ -11,6 +11,7 @@ import (
 	"github.com/pocketbase/pocketbase/tests"
 	"github.com/pocketbase/pocketbase/tools/list"
 	"github.com/pocketbase/pocketbase/tools/search"
+	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 func TestRecordFieldResolverAllowedFields(t *testing.T) {
@@ -600,7 +601,8 @@ func TestRecordFieldResolverResolveCollectionFields(t *testing.T) {
 		{"self_rel_many.self_rel_many.self_rel_many.self_rel_many.self_rel_many.self_rel_many.self_rel_many.id", true, ""},
 
 		// back relations
-		{"rel_one_cascade.demo4_via_title.id", true, ""}, // non-relation via field
+		{"rel_one_cascade.demo4_via_title.id", true, ""},        // not a relation field
+		{"rel_one_cascade.demo4_via_self_rel_one.id", true, ""}, // relation field but to a different collection
 		{"rel_one_cascade.demo4_via_rel_one_cascade.id", false, "[[demo4_rel_one_cascade_demo4_via_rel_one_cascade.id]]"},
 		{"rel_one_cascade.demo4_via_rel_one_cascade.rel_one_cascade.demo4_via_rel_one_cascade.id", false, "[[demo4_rel_one_cascade_demo4_via_rel_one_cascade_rel_one_cascade_demo4_via_rel_one_cascade.id]]"},
 
@@ -614,8 +616,11 @@ func TestRecordFieldResolverResolveCollectionFields(t *testing.T) {
 		// @request.auth relation join
 		{"@request.auth.rel", false, "[[__auth_users.rel]]"},
 		{"@request.auth.rel.title", false, "[[__auth_users_rel.title]]"},
+		{"@request.auth.demo1_via_rel_many.id", false, "[[__auth_users_demo1_via_rel_many.id]]"},
 		{"@request.auth.rel.missing", false, "NULL"},
 		{"@request.auth.missing_via_rel", false, "NULL"},
+		{"@request.auth.demo1_via_file_one.id", false, "NULL"}, // not a relation field
+		{"@request.auth.demo1_via_rel_one.id", false, "NULL"},  // relation field but to a different collection
 
 		// @collection fieds
 		{"@collect", true, ""},
@@ -681,10 +686,14 @@ func TestRecordFieldResolverResolveStaticRequestInfoFields(t *testing.T) {
 			"a": "123",
 		},
 		Body: map[string]any{
-			"number":         "10",
-			"number_unknown": "20",
-			"b":              456,
-			"c":              map[string]int{"sub": 1},
+			"number":          "10",
+			"number_unknown":  "20",
+			"raw_json_obj":    types.JSONRaw(`{"a":123}`),
+			"raw_json_arr1":   types.JSONRaw(`[123, 456]`),
+			"raw_json_arr2":   types.JSONRaw(`[{"a":123},{"b":456}]`),
+			"raw_json_simple": types.JSONRaw(`123`),
+			"b":               456,
+			"c":               map[string]int{"sub": 1},
 		},
 		Headers: map[string]string{
 			"d": "789",
@@ -726,6 +735,14 @@ func TestRecordFieldResolverResolveStaticRequestInfoFields(t *testing.T) {
 		{"@request.auth.emailVisibility", false, `false`},
 		{"@request.auth.email", false, `"test@example.com"`}, // should always be returned no matter of the emailVisibility state
 		{"@request.auth.missing", false, `NULL`},
+		{"@request.body.raw_json_simple", false, `"123"`},
+		{"@request.body.raw_json_simple.a", false, `NULL`},
+		{"@request.body.raw_json_obj.a", false, `123`},
+		{"@request.body.raw_json_obj.b", false, `NULL`},
+		{"@request.body.raw_json_arr1.1", false, `456`},
+		{"@request.body.raw_json_arr1.3", false, `NULL`},
+		{"@request.body.raw_json_arr2.0.a", false, `123`},
+		{"@request.body.raw_json_arr2.0.b", false, `NULL`},
 	}
 
 	for _, s := range scenarios {

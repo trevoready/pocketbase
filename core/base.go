@@ -1157,26 +1157,25 @@ func (app *BaseApp) initDataDB() error {
 	return nil
 }
 
-var sqlLogReplacements = map[string]string{
-	"{{":    "`",
-	"}}":    "`",
-	"[[":    "`",
-	"]]":    "`",
-	"<nil>": "NULL",
+var sqlLogReplacements = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`\[\[([^\[\]\{\}\.]+)\.([^\[\]\{\}\.]+)\]\]`), "`$1`.`$2`"},
+	{regexp.MustCompile(`\{\{([^\[\]\{\}\.]+)\.([^\[\]\{\}\.]+)\}\}`), "`$1`.`$2`"},
+	{regexp.MustCompile(`([^'"])\{\{`), "$1`"},
+	{regexp.MustCompile(`\}\}([^'"])`), "`$1"},
+	{regexp.MustCompile(`([^'"])\[\[`), "$1`"},
+	{regexp.MustCompile(`\]\]([^'"])`), "`$1"},
+	{regexp.MustCompile(`<nil>`), "NULL"},
 }
-var sqlLogPrefixedTableIdentifierPattern = regexp.MustCompile(`\[\[([^\[\]\{\}\.]+)\.([^\[\]\{\}\.]+)\]\]`)
-var sqlLogPrefixedColumnIdentifierPattern = regexp.MustCompile(`\{\{([^\[\]\{\}\.]+)\.([^\[\]\{\}\.]+)\}\}`)
 
 // normalizeSQLLog replaces common query builder charactes with their plain SQL version for easier debugging.
 // The query is still not suitable for execution and should be used only for log and debug purposes
 // (the normalization is done here to avoid breaking changes in dbx).
 func normalizeSQLLog(sql string) string {
-	sql = sqlLogPrefixedTableIdentifierPattern.ReplaceAllString(sql, "`$1`.`$2`")
-
-	sql = sqlLogPrefixedColumnIdentifierPattern.ReplaceAllString(sql, "`$1`.`$2`")
-
-	for old, new := range sqlLogReplacements {
-		sql = strings.ReplaceAll(sql, old, new)
+	for _, item := range sqlLogReplacements {
+		sql = item.pattern.ReplaceAllString(sql, item.replacement)
 	}
 
 	return sql

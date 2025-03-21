@@ -3,6 +3,7 @@ package apis
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,6 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/auth"
 	"github.com/pocketbase/pocketbase/tools/dbutils"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"golang.org/x/oauth2"
@@ -34,6 +34,8 @@ func recordAuthWithOAuth2(e *core.RequestEvent) error {
 	if e.Auth != nil && e.Auth.Collection().Id == collection.Id {
 		fallbackAuthRecord = e.Auth
 	}
+
+	e.Set(core.RequestEventKeyInfoContext, core.RequestInfoContextOAuth2)
 
 	form := new(recordOAuth2LoginForm)
 	form.collection = collection
@@ -134,13 +136,17 @@ func recordAuthWithOAuth2(e *core.RequestEvent) error {
 			return firstApiError(err, e.BadRequestError("Failed to authenticate.", err))
 		}
 
-		meta := struct {
-			*auth.AuthUser
-			IsNew bool `json:"isNew"`
-		}{
-			AuthUser: e.OAuth2User,
-			IsNew:    e.IsNewRecord,
+		// @todo revert back to struct after removing the custom auth.AuthUser marshalization
+		meta := map[string]any{}
+		rawOAuth2User, err := json.Marshal(e.OAuth2User)
+		if err != nil {
+			return err
 		}
+		err = json.Unmarshal(rawOAuth2User, &meta)
+		if err != nil {
+			return err
+		}
+		meta["isNew"] = e.IsNewRecord
 
 		return RecordAuthResponse(e.RequestEvent, e.Record, core.MFAMethodOAuth2, meta)
 	})
@@ -232,7 +238,11 @@ func oauth2Submit(e *core.RecordAuthWithOAuth2RequestEvent, optExternalAuth *cor
 				payload = map[string]any{}
 			}
 
-			payload[core.FieldNameEmail] = e.OAuth2User.Email
+			// assign the OAuth2 user email only if the user hasn't submitted one
+			// (ignore empty/invalid values for consistency with the OAuth2->existing user update flow)
+			if v, _ := payload[core.FieldNameEmail].(string); v == "" {
+				payload[core.FieldNameEmail] = e.OAuth2User.Email
+			}
 
 			// map known fields (unless the field was explicitly submitted as part of CreateData)
 			if _, ok := payload[e.Collection.OAuth2.MappedFields.Id]; !ok && e.Collection.OAuth2.MappedFields.Id != "" {
