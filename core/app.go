@@ -13,6 +13,7 @@ import (
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/hook"
 	"github.com/pocketbase/pocketbase/tools/mailer"
+	"github.com/pocketbase/pocketbase/tools/sms"
 	"github.com/pocketbase/pocketbase/tools/store"
 	"github.com/pocketbase/pocketbase/tools/subscriptions"
 )
@@ -82,6 +83,10 @@ type App interface {
 	// NewMailClient creates and returns a new SMTP or Sendmail client
 	// based on the current app settings.
 	NewMailClient() mailer.Mailer
+
+	// NewSMSClient creates and returns a new SMS client
+	// based on the current app settings.
+	NewSMSClient() sms.SMS
 
 	// NewFilesystem creates a new local or S3 filesystem instance
 	// for managing regular app files (ex. record uploads)
