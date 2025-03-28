@@ -12,7 +12,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.8
 	github.com/ganigeorgiev/fexpr v0.4.1
 	github.com/go-ozzo/ozzo-validation/v4 v4.3.0
-	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/pocketbase/dbx v1.11.0
 	github.com/pocketbase/tygoja v0.0.0-20250103200817-ca580d8c5119
 	github.com/spf13/cast v1.7.1
@@ -22,7 +22,7 @@ require (
 	golang.org/x/net v0.37.0
 	golang.org/x/oauth2 v0.28.0
 	golang.org/x/sync v0.12.0
-	modernc.org/sqlite v1.36.1
+	modernc.org/sqlite v1.36.2
 )
 
 require (
@@ -32,7 +32,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/golang/mock v1.6.0 // indirect
-	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
+	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
