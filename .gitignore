@@ -2,6 +2,7 @@
 .idea
 
 .DS_Store
+._*
 
 # goreleaser builds folder
 /.builds/

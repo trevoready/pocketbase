@@ -27,6 +27,7 @@ import (
 	"github.com/pocketbase/pocketbase/tools/types"
 	"github.com/spf13/cast"
 	"golang.org/x/sync/semaphore"
+	"github.com/pocketbase/pocketbase/tools/sms"
 )
 
 const (
@@ -703,6 +704,23 @@ func (app *BaseApp) NewMailClient() mailer.Mailer {
 	}
 
 	return client
+}
+
+// New SMS client
+func (app *BaseApp) NewSMSClient() sms.SMS {
+	var client sms.SMS
+
+	// init sms client
+	if app.Settings().SMS.Enabled {
+		client = &sms.TwilioClient{
+			AccountSid: app.Settings().SMS.AccountSID,
+			AuthToken:  app.Settings().SMS.AuthToken,
+			From:       app.Settings().SMS.FromNumber,
+		}
+	}
+
+	return client
+
 }
 
 // NewFilesystem creates a new local or S3 filesystem instance
