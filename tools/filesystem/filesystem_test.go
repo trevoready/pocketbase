@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"mime/multipart"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 )
 
@@ -431,6 +433,36 @@ func TestFileSystemServe(t *testing.T) {
 			},
 		},
 		{
+			// js exception
+			"main.js",
+			"test_name.js",
+			nil,
+			nil,
+			false,
+			map[string]string{
+				"Content-Disposition":     "attachment; filename=test_name.js",
+				"Content-Type":            "text/javascript",
+				"Content-Length":          "0",
+				"Content-Security-Policy": csp,
+				"Cache-Control":           cacheControl,
+			},
+		},
+		{
+			// mjs exception
+			"main.mjs",
+			"test_name.mjs",
+			nil,
+			nil,
+			false,
+			map[string]string{
+				"Content-Disposition":     "attachment; filename=test_name.mjs",
+				"Content-Type":            "text/javascript",
+				"Content-Length":          "0",
+				"Content-Security-Policy": csp,
+				"Cache-Control":           cacheControl,
+			},
+		},
+		{
 			// custom header
 			"test/sub2.txt",
 			"test_name.txt",
@@ -494,7 +526,7 @@ func TestFileSystemServe(t *testing.T) {
 	}
 }
 
-func TestFileSystemGetFile(t *testing.T) {
+func TestFileSystemGetReader(t *testing.T) {
 	dir := createTestDir(t)
 	defer os.RemoveAll(dir)
 
@@ -515,7 +547,7 @@ func TestFileSystemGetFile(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(s.file, func(t *testing.T) {
-			f, err := fsys.GetFile(s.file)
+			f, err := fsys.GetReader(s.file)
 			defer func() {
 				if f != nil {
 					f.Close()
@@ -546,6 +578,83 @@ func TestFileSystemGetFile(t *testing.T) {
 	}
 }
 
+func TestFileSystemGetReuploadableFile(t *testing.T) {
+	dir := createTestDir(t)
+	defer os.RemoveAll(dir)
+
+	fsys, err := filesystem.NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+
+	t.Run("missing.txt", func(t *testing.T) {
+		_, err := fsys.GetReuploadableFile("missing.txt", false)
+		if err == nil {
+			t.Fatal("Expected error, got nil")
+		}
+	})
+
+	testReader := func(t *testing.T, f *filesystem.File, expectedContent string) {
+		r, err := f.Reader.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		raw, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rawStr := string(raw)
+
+		if rawStr != expectedContent {
+			t.Fatalf("Expected content %q, got %q", expectedContent, rawStr)
+		}
+	}
+
+	t.Run("existing (preserve name)", func(t *testing.T) {
+		file, err := fsys.GetReuploadableFile("test/sub1.txt", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if v := file.OriginalName; v != "sub1.txt" {
+			t.Fatalf("Expected originalName %q, got %q", "sub1.txt", v)
+		}
+
+		if v := file.Size; v != 4 {
+			t.Fatalf("Expected size %d, got %d", 4, v)
+		}
+
+		if v := file.Name; v != "sub1.txt" {
+			t.Fatalf("Expected name to be preserved, got %q", v)
+		}
+
+		testReader(t, file, "sub1")
+	})
+
+	t.Run("existing (new random suffix name)", func(t *testing.T) {
+		file, err := fsys.GetReuploadableFile("test/sub1.txt", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if v := file.OriginalName; v != "sub1.txt" {
+			t.Fatalf("Expected originalName %q, got %q", "sub1.txt", v)
+		}
+
+		if v := file.Size; v != 4 {
+			t.Fatalf("Expected size %d, got %d", 4, v)
+		}
+
+		if v := file.Name; v == "sub1.txt" || len(v) <= len("sub1.txt.png") {
+			t.Fatalf("Expected name to have new random suffix, got %q", v)
+		}
+
+		testReader(t, file, "sub1")
+	})
+}
+
 func TestFileSystemCopy(t *testing.T) {
 	dir := createTestDir(t)
 	defer os.RemoveAll(dir)
@@ -568,7 +677,7 @@ func TestFileSystemCopy(t *testing.T) {
 	if err := fsys.Copy(src, dst); err != nil {
 		t.Fatalf("Failed to copy %q to %q: %v", src, dst, err)
 	}
-	f, err := fsys.GetFile(dst)
+	f, err := fsys.GetReader(dst)
 	//nolint
 	defer f.Close()
 	if err != nil {
@@ -597,9 +706,13 @@ func TestFileSystemList(t *testing.T) {
 			"",
 			[]string{
 				"image.png",
+				"image.jpg",
 				"image.svg",
+				"image.webp",
 				"image_! noext",
 				"style.css",
+				"main.js",
+				"main.mjs",
 				"test/sub1.txt",
 				"test/sub2.txt",
 			},
@@ -618,25 +731,30 @@ func TestFileSystemList(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		objs, err := fsys.List(s.prefix)
-		if err != nil {
-			t.Fatalf("[%s] %v", s.prefix, err)
-		}
-
-		if len(s.expected) != len(objs) {
-			t.Fatalf("[%s] Expected %d files, got \n%v", s.prefix, len(s.expected), objs)
-		}
-
-	ObjsLoop:
-		for _, obj := range objs {
-			for _, name := range s.expected {
-				if name == obj.Key {
-					continue ObjsLoop
-				}
+		t.Run("prefix_"+s.prefix, func(t *testing.T) {
+			objs, err := fsys.List(s.prefix)
+			if err != nil {
+				t.Fatal(err)
 			}
 
-			t.Fatalf("[%s] Unexpected file %q", s.prefix, obj.Key)
-		}
+			if len(s.expected) != len(objs) {
+				t.Fatalf("Expected %d files, got \n%v", len(s.expected), objs)
+			}
+
+			for _, obj := range objs {
+				var exists bool
+				for _, name := range s.expected {
+					if name == obj.Key {
+						exists = true
+						break
+					}
+				}
+
+				if !exists {
+					t.Fatalf("Unexpected file %q", obj.Key)
+				}
+			}
+		})
 	}
 }
 
@@ -714,39 +832,67 @@ func TestFileSystemCreateThumb(t *testing.T) {
 	defer fsys.Close()
 
 	scenarios := []struct {
-		file        string
-		thumb       string
-		cropCenter  bool
-		expectError bool
+		file             string
+		thumb            string
+		size             string
+		expectedMimeType string
 	}{
 		// missing
-		{"missing.txt", "thumb_test_missing", true, true},
+		{"missing.txt", "thumb_test_missing", "100x100", ""},
 		// non-image existing file
-		{"test/sub1.txt", "thumb_test_sub1", true, true},
-		// existing image file - crop center
-		{"image.png", "thumb_file_center", true, false},
-		// existing image file - crop top
-		{"image.png", "thumb_file_top", false, false},
+		{"test/sub1.txt", "thumb_test_sub1", "100x100", ""},
 		// existing image file with existing thumb path = should fail
-		{"image.png", "test", true, true},
+		{"image.png", "test", "100x100", ""},
+		// existing image file with invalid thumb size
+		{"image.png", "thumb0", "invalid", ""},
+		// existing image file with 0xH thumb size
+		{"image.png", "thumb_0xH", "0x100", "image/png"},
+		// existing image file with Wx0 thumb size
+		{"image.png", "thumb_Wx0", "100x0", "image/png"},
+		// existing image file with WxH thumb size
+		{"image.png", "thumb_WxH", "100x100", "image/png"},
+		// existing image file with WxHt thumb size
+		{"image.png", "thumb_WxHt", "100x100t", "image/png"},
+		// existing image file with WxHb thumb size
+		{"image.png", "thumb_WxHb", "100x100b", "image/png"},
+		// existing image file with WxHf thumb size
+		{"image.png", "thumb_WxHf", "100x100f", "image/png"},
+		// jpg
+		{"image.jpg", "thumb.jpg", "100x100", "image/jpeg"},
+		// webp (should produce png)
+		{"image.webp", "thumb.webp", "100x100", "image/png"},
 	}
 
-	for i, scenario := range scenarios {
-		err := fsys.CreateThumb(scenario.file, scenario.thumb, "100x100")
+	for _, s := range scenarios {
+		t.Run(s.file+"_"+s.thumb+"_"+s.size, func(t *testing.T) {
+			err := fsys.CreateThumb(s.file, s.thumb, s.size)
 
-		hasErr := err != nil
-		if hasErr != scenario.expectError {
-			t.Errorf("(%d) Expected hasErr to be %v, got %v (%v)", i, scenario.expectError, hasErr, err)
-			continue
-		}
+			expectErr := s.expectedMimeType == ""
 
-		if scenario.expectError {
-			continue
-		}
+			hasErr := err != nil
+			if hasErr != expectErr {
+				t.Fatalf("Expected hasErr to be %v, got %v (%v)", expectErr, hasErr, err)
+			}
 
-		if exists, _ := fsys.Exists(scenario.thumb); !exists {
-			t.Errorf("(%d) Couldn't find %q thumb", i, scenario.thumb)
-		}
+			if hasErr {
+				return
+			}
+
+			f, err := fsys.GetReader(s.thumb)
+			if err != nil {
+				t.Fatalf("Missing expected thumb %s (%v)", s.thumb, err)
+			}
+			defer f.Close()
+
+			mt, err := mimetype.DetectReader(f)
+			if err != nil {
+				t.Fatalf("Failed to detect thumb %s mimetype (%v)", s.thumb, err)
+			}
+
+			if mtStr := mt.String(); mtStr != s.expectedMimeType {
+				t.Fatalf("Expected thumb %s MimeType %q, got %q", s.thumb, s.expectedMimeType, mtStr)
+			}
+		})
 	}
 }
 
@@ -778,36 +924,93 @@ func createTestDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	file3, err := os.OpenFile(filepath.Join(dir, "image.png"), os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	imgRect := image.Rect(0, 0, 1, 1) // tiny 1x1 png
-	png.Encode(file3, imgRect)
-	file3.Close()
-	err2 := os.WriteFile(filepath.Join(dir, "image.png.attrs"), []byte(`{"user.cache_control":"","user.content_disposition":"","user.content_encoding":"","user.content_language":"","user.content_type":"image/png","user.metadata":null}`), 0644)
-	if err2 != nil {
-		t.Fatal(err2)
+	// png
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "image.png"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		imgRect := image.Rect(0, 0, 1, 1) // tiny 1x1 png
+		_ = png.Encode(file, imgRect)
+		file.Close()
+		err = os.WriteFile(filepath.Join(dir, "image.png.attrs"), []byte(`{"user.cache_control":"","user.content_disposition":"","user.content_encoding":"","user.content_language":"","user.content_type":"image/png","user.metadata":null}`), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	file4, err := os.OpenFile(filepath.Join(dir, "image.svg"), os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		t.Fatal(err)
+	// jpg
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "image.jpg"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		imgRect := image.Rect(0, 0, 1, 1) // tiny 1x1 jpg
+		_ = jpeg.Encode(file, imgRect, nil)
+		file.Close()
+		err = os.WriteFile(filepath.Join(dir, "image.jpg.attrs"), []byte(`{"user.cache_control":"","user.content_disposition":"","user.content_encoding":"","user.content_language":"","user.content_type":"image/jpeg","user.metadata":null}`), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	file4.Close()
 
-	file5, err := os.OpenFile(filepath.Join(dir, "style.css"), os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		t.Fatal(err)
+	// svg
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "image.svg"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
 	}
-	file5.Close()
 
-	file6, err := os.OpenFile(filepath.Join(dir, "image_! noext"), os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		t.Fatal(err)
+	// webp
+	{
+		err := os.WriteFile(filepath.Join(dir, "image.webp"), []byte{
+			82, 73, 70, 70, 36, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 32,
+			24, 0, 0, 0, 48, 1, 0, 157, 1, 42, 1, 0, 1, 0, 2, 0, 52, 37,
+			164, 0, 3, 112, 0, 254, 251, 253, 80, 0,
+		}, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	png.Encode(file6, image.Rect(0, 0, 1, 1)) // tiny 1x1 png
-	file6.Close()
+
+	// no extension and invalid characters
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "image_! noext"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = png.Encode(file, image.Rect(0, 0, 1, 1)) // tiny 1x1 png
+		file.Close()
+	}
+
+	// css
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "style.css"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+	}
+
+	// js
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "main.js"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+	}
+
+	// mjs
+	{
+		file, err := os.OpenFile(filepath.Join(dir, "main.mjs"), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+	}
 
 	return dir
 }

@@ -879,7 +879,7 @@ func TestRecordGetInt(t *testing.T) {
 		{123, 123},
 		{2.4, 2},
 		{"123", 123},
-		{"123.5", 0},
+		{"123.5", 123},
 		{false, 0},
 		{true, 1},
 	}
@@ -1011,6 +1011,43 @@ func TestRecordGetStringSlice(t *testing.T) {
 				if !slices.Contains(s.expected, v) {
 					t.Fatalf("Cannot find %v in %v", v, s.expected)
 				}
+			}
+		})
+	}
+}
+
+func TestRecordGetGeoPoint(t *testing.T) {
+	t.Parallel()
+
+	scenarios := []struct {
+		value    any
+		expected string
+	}{
+		{nil, `{"lon":0,"lat":0}`},
+		{"", `{"lon":0,"lat":0}`},
+		{0, `{"lon":0,"lat":0}`},
+		{false, `{"lon":0,"lat":0}`},
+		{"{}", `{"lon":0,"lat":0}`},
+		{"[]", `{"lon":0,"lat":0}`},
+		{[]int{1, 2}, `{"lon":0,"lat":0}`},
+		{map[string]any{"lon": 1, "lat": 2}, `{"lon":1,"lat":2}`},
+		{[]byte(`{"lon":1,"lat":2}`), `{"lon":1,"lat":2}`},
+		{`{"lon":1,"lat":2}`, `{"lon":1,"lat":2}`},
+		{types.GeoPoint{Lon: 1, Lat: 2}, `{"lon":1,"lat":2}`},
+		{&types.GeoPoint{Lon: 1, Lat: 2}, `{"lon":1,"lat":2}`},
+	}
+
+	collection := core.NewBaseCollection("test")
+	record := core.NewRecord(collection)
+
+	for i, s := range scenarios {
+		t.Run(fmt.Sprintf("%d_%#v", i, s.value), func(t *testing.T) {
+			record.Set("test", s.value)
+
+			pointStr := record.GetGeoPoint("test").String()
+
+			if pointStr != s.expected {
+				t.Fatalf("Expected %q, got %q", s.expected, pointStr)
 			}
 		})
 	}
@@ -1659,18 +1696,21 @@ func TestRecordModelEventSync(t *testing.T) {
 
 	changeRecordEventBefore := func(e *core.RecordEvent) {
 		e.Type = "test_b"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 123)
 		e.Record = testRecords[1]
 	}
 
 	modelEventFinalizerChange := func(e *core.ModelEvent) {
 		e.Type = "test_c"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 456)
 		e.Model = testRecords[2]
 	}
 
 	changeRecordEventAfter := func(e *core.RecordEvent) {
 		e.Type = "test_d"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 789)
 		e.Record = testRecords[3]
 	}
@@ -2214,13 +2254,13 @@ func TestRecordDelete(t *testing.T) {
 	app.NonconcurrentDB().(*dbx.DB).QueryLogFunc = func(ctx context.Context, t time.Duration, sql string, rows *sql.Rows, err error) {
 		calledQueries = append(calledQueries, sql)
 	}
-	app.DB().(*dbx.DB).QueryLogFunc = func(ctx context.Context, t time.Duration, sql string, rows *sql.Rows, err error) {
+	app.ConcurrentDB().(*dbx.DB).QueryLogFunc = func(ctx context.Context, t time.Duration, sql string, rows *sql.Rows, err error) {
 		calledQueries = append(calledQueries, sql)
 	}
 	app.NonconcurrentDB().(*dbx.DB).ExecLogFunc = func(ctx context.Context, t time.Duration, sql string, result sql.Result, err error) {
 		calledQueries = append(calledQueries, sql)
 	}
-	app.DB().(*dbx.DB).ExecLogFunc = func(ctx context.Context, t time.Duration, sql string, result sql.Result, err error) {
+	app.ConcurrentDB().(*dbx.DB).ExecLogFunc = func(ctx context.Context, t time.Duration, sql string, result sql.Result, err error) {
 		calledQueries = append(calledQueries, sql)
 	}
 	rec3, _ := app.FindRecordById("users", "oap640cot4yru2s")
@@ -2240,7 +2280,7 @@ func TestRecordDelete(t *testing.T) {
 	}
 	// ensure that the json rel fields were prefixed
 	joinedQueries := strings.Join(calledQueries, " ")
-	expectedRelManyPart := "SELECT `demo1`.* FROM `demo1` WHERE EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid([[demo1.rel_many]]) THEN [[demo1.rel_many]] ELSE json_array([[demo1.rel_many]]) END) {{__je__}} WHERE [[__je__.value]]='"
+	expectedRelManyPart := "SELECT `demo1`.* FROM `demo1` WHERE EXISTS (SELECT 1 FROM json_each(CASE WHEN iif(json_valid([[demo1.rel_many]]), json_type([[demo1.rel_many]])='array', FALSE) THEN [[demo1.rel_many]] ELSE json_array([[demo1.rel_many]]) END) {{__je__}} WHERE [[__je__.value]]='"
 	if !strings.Contains(joinedQueries, expectedRelManyPart) {
 		t.Fatalf("(rec3) Expected the cascade delete to call the query \n%v, got \n%v", expectedRelManyPart, calledQueries)
 	}

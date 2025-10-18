@@ -309,6 +309,44 @@ func baseBinds(vm *goja.Runtime) {
 		return string(bodyBytes), nil
 	})
 
+	// note: throw only on reader error
+	vm.Set("toBytes", func(raw any, maxReaderBytes int) ([]byte, error) {
+		switch v := raw.(type) {
+		case nil:
+			return []byte{}, nil
+		case string:
+			return []byte(v), nil
+		case []byte:
+			return v, nil
+		case types.JSONRaw:
+			return v, nil
+		case io.Reader:
+			if maxReaderBytes == 0 {
+				maxReaderBytes = router.DefaultMaxMemory
+			}
+
+			limitReader := io.LimitReader(v, int64(maxReaderBytes))
+
+			return io.ReadAll(limitReader)
+		default:
+			b, err := cast.ToUint8SliceE(v)
+			if err == nil {
+				return b, nil
+			}
+
+			str, err := cast.ToStringE(v)
+			if err == nil {
+				return []byte(str), nil
+			}
+
+			// as a last attempt try to json encode the value
+			rawBytes, _ := json.Marshal(raw)
+
+			return rawBytes, nil
+		}
+	})
+
+	// note: throw only on reader error
 	vm.Set("toString", func(raw any, maxReaderBytes int) (string, error) {
 		switch v := raw.(type) {
 		case io.Reader:
@@ -495,6 +533,10 @@ func baseBinds(vm *goja.Runtime) {
 		instance := &core.FileField{}
 		return structConstructorUnmarshal(vm, call, instance)
 	})
+	vm.Set("GeoPointField", func(call goja.ConstructorCall) *goja.Object {
+		instance := &core.GeoPointField{}
+		return structConstructorUnmarshal(vm, call, instance)
+	})
 	// ---
 
 	vm.Set("MailerMessage", func(call goja.ConstructorCall) *goja.Object {
@@ -548,9 +590,18 @@ func baseBinds(vm *goja.Runtime) {
 	vm.Set("DateTime", func(call goja.ConstructorCall) *goja.Object {
 		instance := types.NowDateTime()
 
-		val, _ := call.Argument(0).Export().(string)
-		if val != "" {
-			instance, _ = types.ParseDateTime(val)
+		rawDate, _ := call.Argument(0).Export().(string)
+		locName, _ := call.Argument(1).Export().(string)
+		if rawDate != "" && locName != "" {
+			loc, err := time.LoadLocation(locName)
+			if err != nil {
+				loc = time.UTC
+			}
+
+			instance, _ = types.ParseDateTime(cast.ToTimeInDefaultLocation(rawDate, loc))
+		} else if rawDate != "" {
+			// forward directly to ParseDateTime to preserve the original behavior
+			instance, _ = types.ParseDateTime(rawDate)
 		}
 
 		instanceValue := vm.ToValue(instance).(*goja.Object)
@@ -719,6 +770,8 @@ func osBinds(vm *goja.Runtime) {
 	obj.Set("rename", os.Rename)
 	obj.Set("remove", os.Remove)
 	obj.Set("removeAll", os.RemoveAll)
+	obj.Set("openRoot", os.OpenRoot)
+	obj.Set("openInRoot", os.OpenInRoot)
 }
 
 func formsBinds(vm *goja.Runtime) {
@@ -774,11 +827,15 @@ func httpClientBinds(vm *goja.Runtime) {
 	})
 
 	type sendResult struct {
-		JSON       any                     `json:"json"`
-		Headers    map[string][]string     `json:"headers"`
-		Cookies    map[string]*http.Cookie `json:"cookies"`
-		Raw        string                  `json:"raw"`
-		StatusCode int                     `json:"statusCode"`
+		JSON    any                     `json:"json"`
+		Headers map[string][]string     `json:"headers"`
+		Cookies map[string]*http.Cookie `json:"cookies"`
+
+		// Deprecated: consider using Body instead
+		Raw string `json:"raw"`
+
+		Body       []byte `json:"body"`
+		StatusCode int    `json:"statusCode"`
 	}
 
 	type sendConfig struct {
@@ -883,6 +940,7 @@ func httpClientBinds(vm *goja.Runtime) {
 			Headers:    map[string][]string{},
 			Cookies:    map[string]*http.Cookie{},
 			Raw:        string(bodyRaw),
+			Body:       bodyRaw,
 		}
 
 		for k, v := range res.Header {
@@ -893,7 +951,7 @@ func httpClientBinds(vm *goja.Runtime) {
 			result.Cookies[v.Name] = v
 		}
 
-		if len(result.Raw) != 0 {
+		if len(result.Body) > 0 {
 			// try as map
 			result.JSON = map[string]any{}
 			if err := json.Unmarshal(bodyRaw, &result.JSON); err != nil {

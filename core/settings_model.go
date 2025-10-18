@@ -690,8 +690,8 @@ type RateLimitRule struct {
 
 	// Audience specifies the auth group the rule should apply for:
 	//   - ""      - both guests and authenticated users (default)
-	//   - "guest" - only for guests
-	//   - "auth"  - only for authenticated users
+	//   - "@guest" - only for guests
+	//   - "@auth"  - only for authenticated users
 	Audience string `form:"audience" json:"audience"`
 
 	// Duration specifies the interval (in seconds) per which to reset
@@ -717,4 +717,14 @@ func (c RateLimitRule) Validate() error {
 // DurationTime returns the tag's Duration as [time.Duration].
 func (c RateLimitRule) DurationTime() time.Duration {
 	return time.Duration(c.Duration) * time.Second
+}
+
+// String returns a string representation of the rule.
+func (c RateLimitRule) String() string {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return c.Label // extremely rare case
+	}
+
+	return string(raw)
 }

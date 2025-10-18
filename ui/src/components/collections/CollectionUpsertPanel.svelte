@@ -1,4 +1,18 @@
 <script>
+    import { createEventDispatcher, tick } from "svelte";
+    import { scale } from "svelte/transition";
+    import ApiClient from "@/utils/ApiClient";
+    import CommonHelper from "@/utils/CommonHelper";
+    import { confirm } from "@/stores/confirmation";
+    import { errors, removeError, setErrors } from "@/stores/errors";
+    import { addSuccessToast, removeAllToasts } from "@/stores/toasts";
+    import {
+        addCollection,
+        removeCollection,
+        scaffolds,
+        activeCollection,
+        refreshScaffolds,
+    } from "@/stores/collections";
     import tooltip from "@/actions/tooltip";
     import Field from "@/components/base/Field.svelte";
     import OverlayPanel from "@/components/base/OverlayPanel.svelte";
@@ -8,14 +22,6 @@
     import CollectionQueryTab from "@/components/collections/CollectionQueryTab.svelte";
     import CollectionRulesTab from "@/components/collections/CollectionRulesTab.svelte";
     import CollectionUpdateConfirm from "@/components/collections/CollectionUpdateConfirm.svelte";
-    import { addCollection, removeCollection, scaffolds, activeCollection } from "@/stores/collections";
-    import { confirm } from "@/stores/confirmation";
-    import { errors, removeError, setErrors } from "@/stores/errors";
-    import { addSuccessToast, removeAllToasts } from "@/stores/toasts";
-    import ApiClient from "@/utils/ApiClient";
-    import CommonHelper from "@/utils/CommonHelper";
-    import { createEventDispatcher, tick } from "svelte";
-    import { scale } from "svelte/transition";
 
     const TAB_SCHEMA = "schema";
     const TAB_RULES = "api_rules";
@@ -161,7 +167,7 @@
         isLoadingConfirmation = false;
     }
 
-    function save(hideAfterSave = true) {
+    async function save(hideAfterSave = true) {
         if (isSaving) {
             return;
         }
@@ -171,45 +177,44 @@
         const data = exportFormData();
         const isNew = !collection.id;
 
-        let request;
-        if (isNew) {
-            request = ApiClient.collections.create(data);
-        } else {
-            request = ApiClient.collections.update(collection.id, data);
+        try {
+            let result;
+            if (isNew) {
+                result = await ApiClient.collections.create(data);
+            } else {
+                result = await ApiClient.collections.update(collection.id, data);
+            }
+
+            removeAllToasts();
+
+            addCollection(result);
+
+            if (hideAfterSave) {
+                confirmClose = false;
+                hide();
+            } else {
+                load(result);
+            }
+
+            addSuccessToast(
+                !collection.id ? "Successfully created collection." : "Successfully updated collection.",
+            );
+
+            dispatch("save", {
+                isNew: isNew,
+                collection: result,
+            });
+
+            if (isNew) {
+                $activeCollection = result;
+
+                await refreshScaffolds();
+            }
+        } catch (err) {
+            ApiClient.error(err);
         }
 
-        return request
-            .then((result) => {
-                removeAllToasts();
-
-                addCollection(result);
-
-                if (hideAfterSave) {
-                    confirmClose = false;
-                    hide();
-                } else {
-                    load(result);
-                }
-
-                addSuccessToast(
-                    !collection.id ? "Successfully created collection." : "Successfully updated collection.",
-                );
-
-                dispatch("save", {
-                    isNew: isNew,
-                    collection: result,
-                });
-
-                if (isNew) {
-                    $activeCollection = result;
-                }
-            })
-            .catch((err) => {
-                ApiClient.error(err);
-            })
-            .finally(() => {
-                isSaving = false;
-            });
+        isSaving = false;
     }
 
     function exportFormData() {

@@ -28,9 +28,9 @@ func bindRecordCrudApi(app core.App, rg *router.RouterGroup[*core.RequestEvent])
 	subGroup := rg.Group("/collections/{collection}/records").Unbind(DefaultRateLimitMiddlewareId)
 	subGroup.GET("", recordsList)
 	subGroup.GET("/{id}", recordView)
-	subGroup.POST("", recordCreate(nil)).Bind(dynamicCollectionBodyLimit(""))
-	subGroup.PATCH("/{id}", recordUpdate(nil)).Bind(dynamicCollectionBodyLimit(""))
-	subGroup.DELETE("/{id}", recordDelete(nil))
+	subGroup.POST("", recordCreate(true, nil)).Bind(dynamicCollectionBodyLimit(""))
+	subGroup.PATCH("/{id}", recordUpdate(true, nil)).Bind(dynamicCollectionBodyLimit(""))
+	subGroup.DELETE("/{id}", recordDelete(true, nil))
 }
 
 func recordsList(e *core.RequestEvent) error {
@@ -79,6 +79,11 @@ func recordsList(e *core.RequestEvent) error {
 
 	searchProvider := search.NewProvider(fieldsResolver).Query(query)
 
+	// use rowid when available to minimize the need of a covering index with the "id" field
+	if !collection.IsView() {
+		searchProvider.CountCol("_rowid_")
+	}
+
 	records := []*core.Record{}
 	result, err := searchProvider.ParseAndExec(e.Request.URL.Query().Encode(), &records)
 	if err != nil {
@@ -116,7 +121,9 @@ func recordsList(e *core.RequestEvent) error {
 			randomizedThrottle(150)
 		}
 
-		return e.JSON(http.StatusOK, e.Result)
+		return execAfterSuccessTx(true, e.App, func() error {
+			return e.JSON(http.StatusOK, e.Result)
+		})
 	})
 }
 
@@ -187,11 +194,13 @@ func recordView(e *core.RequestEvent) error {
 			return firstApiError(err, e.InternalServerError("Failed to enrich record", err))
 		}
 
-		return e.JSON(http.StatusOK, e.Record)
+		return execAfterSuccessTx(true, e.App, func() error {
+			return e.JSON(http.StatusOK, e.Record)
+		})
 	})
 }
 
-func recordCreate(optFinalizer func(data any) error) func(e *core.RequestEvent) error {
+func recordCreate(responseWriteAfterTx bool, optFinalizer func(data any) error) func(e *core.RequestEvent) error {
 	return func(e *core.RequestEvent) error {
 		collection, err := e.App.FindCachedCollectionByNameOrId(e.Request.PathValue("collection"))
 		if err != nil || collection == nil {
@@ -251,6 +260,73 @@ func recordCreate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 			}
 		}
 
+		// check the request and record data against the create and manage rules
+		if !hasSuperuserAuth && collection.CreateRule != nil {
+			dummyRecord := record.Clone()
+
+			dummyRandomPart := "__pb_create__" + security.PseudorandomString(6)
+
+			// set an id if it doesn't have already
+			// (the value doesn't matter; it is used only to minimize the breaking changes with earlier versions)
+			if dummyRecord.Id == "" {
+				dummyRecord.Id = "__temp_id__" + dummyRandomPart
+			}
+
+			// unset the verified field to prevent manage API rule misuse in case the rule relies on it
+			dummyRecord.SetVerified(false)
+
+			// export the dummy record data into db params
+			dummyExport, err := dummyRecord.DBExport(e.App)
+			if err != nil {
+				return e.BadRequestError("Failed to create record", fmt.Errorf("dummy DBExport error: %w", err))
+			}
+
+			dummyParams := make(dbx.Params, len(dummyExport))
+			selects := make([]string, 0, len(dummyExport))
+			var param string
+			for k, v := range dummyExport {
+				k = inflector.Columnify(k) // columnify is just as extra measure in case of custom fields
+				param = "__pb_create__" + k
+				dummyParams[param] = v
+				selects = append(selects, "{:"+param+"} AS [["+k+"]]")
+			}
+
+			// shallow clone the current collection
+			dummyCollection := *collection
+			dummyCollection.Id += dummyRandomPart
+			dummyCollection.Name += inflector.Columnify(dummyRandomPart)
+
+			withFrom := fmt.Sprintf("WITH {{%s}} as (SELECT %s)", dummyCollection.Name, strings.Join(selects, ","))
+
+			// check non-empty create rule
+			if *dummyCollection.CreateRule != "" {
+				ruleQuery := e.App.ConcurrentDB().Select("(1)").PreFragment(withFrom).From(dummyCollection.Name).AndBind(dummyParams)
+
+				resolver := core.NewRecordFieldResolver(e.App, &dummyCollection, requestInfo, true)
+
+				expr, err := search.FilterData(*dummyCollection.CreateRule).BuildExpr(resolver)
+				if err != nil {
+					return e.BadRequestError("Failed to create record", fmt.Errorf("create rule build expression failure: %w", err))
+				}
+				ruleQuery.AndWhere(expr)
+
+				resolver.UpdateQuery(ruleQuery)
+
+				var exists int
+				err = ruleQuery.Limit(1).Row(&exists)
+				if err != nil || exists == 0 {
+					return e.BadRequestError("Failed to create record", fmt.Errorf("create rule failure: %w", err))
+				}
+			}
+
+			// check for manage rule access
+			manageRuleQuery := e.App.ConcurrentDB().Select("(1)").PreFragment(withFrom).From(dummyCollection.Name).AndBind(dummyParams)
+			if !form.HasManageAccess() &&
+				hasAuthManageAccess(e.App, requestInfo, &dummyCollection, manageRuleQuery) {
+				form.GrantManagerAccess()
+			}
+		}
+
 		var isOptFinalizerCalled bool
 
 		event := new(core.RecordRequestEvent)
@@ -262,73 +338,6 @@ func recordCreate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 			form.SetApp(e.App)
 			form.SetRecord(e.Record)
 
-			// temporary save the record and check it against the create and manage rules
-			if !hasSuperuserAuth && e.Collection.CreateRule != nil {
-				dummyRecord := e.Record.Clone()
-
-				dummyRandomPart := "__pb_create__" + security.PseudorandomString(6)
-
-				// set an id if it doesn't have already
-				// (the value doesn't matter; it is used only to minimize the breaking changes with earlier versions)
-				if dummyRecord.Id == "" {
-					dummyRecord.Id = "__temp_id__" + dummyRandomPart
-				}
-
-				// unset the verified field to prevent manage API rule misuse in case the rule relies on it
-				dummyRecord.SetVerified(false)
-
-				// export the dummy record data into db params
-				dummyExport, err := dummyRecord.DBExport(e.App)
-				if err != nil {
-					return e.BadRequestError("Failed to create record", fmt.Errorf("dummy DBExport error: %w", err))
-				}
-
-				dummyParams := make(dbx.Params, len(dummyExport))
-				selects := make([]string, 0, len(dummyExport))
-				var param string
-				for k, v := range dummyExport {
-					k = inflector.Columnify(k) // columnify is just as extra measure in case of custom fields
-					param = "__pb_create__" + k
-					dummyParams[param] = v
-					selects = append(selects, "{:"+param+"} AS [["+k+"]]")
-				}
-
-				// shallow clone the current collection
-				dummyCollection := *e.Collection
-				dummyCollection.Id += dummyRandomPart
-				dummyCollection.Name += inflector.Columnify(dummyRandomPart)
-
-				withFrom := fmt.Sprintf("WITH {{%s}} as (SELECT %s)", dummyCollection.Name, strings.Join(selects, ","))
-
-				// check non-empty create rule
-				if *dummyCollection.CreateRule != "" {
-					ruleQuery := e.App.DB().Select("(1)").PreFragment(withFrom).From(dummyCollection.Name).AndBind(dummyParams)
-
-					resolver := core.NewRecordFieldResolver(e.App, &dummyCollection, requestInfo, true)
-
-					expr, err := search.FilterData(*dummyCollection.CreateRule).BuildExpr(resolver)
-					if err != nil {
-						return e.BadRequestError("Failed to create record", fmt.Errorf("create rule build expression failure: %w", err))
-					}
-					ruleQuery.AndWhere(expr)
-
-					resolver.UpdateQuery(ruleQuery)
-
-					var exists int
-					err = ruleQuery.Limit(1).Row(&exists)
-					if err != nil || exists == 0 {
-						return e.BadRequestError("Failed to create record", fmt.Errorf("create rule failure: %w", err))
-					}
-				}
-
-				// check for manage rule access
-				manageRuleQuery := e.App.DB().Select("(1)").PreFragment(withFrom).From(dummyCollection.Name).AndBind(dummyParams)
-				if !form.HasManageAccess() &&
-					hasAuthManageAccess(e.App, requestInfo, &dummyCollection, manageRuleQuery) {
-					form.GrantManagerAccess()
-				}
-			}
-
 			err := form.Submit()
 			if err != nil {
 				return firstApiError(err, e.BadRequestError("Failed to create record", err))
@@ -339,7 +348,9 @@ func recordCreate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 				return firstApiError(err, e.InternalServerError("Failed to enrich record", err))
 			}
 
-			err = e.JSON(http.StatusOK, e.Record)
+			err = execAfterSuccessTx(responseWriteAfterTx, e.App, func() error {
+				return e.JSON(http.StatusOK, e.Record)
+			})
 			if err != nil {
 				return err
 			}
@@ -369,7 +380,7 @@ func recordCreate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 	}
 }
 
-func recordUpdate(optFinalizer func(data any) error) func(e *core.RequestEvent) error {
+func recordUpdate(responseWriteAfterTx bool, optFinalizer func(data any) error) func(e *core.RequestEvent) error {
 	return func(e *core.RequestEvent) error {
 		collection, err := e.App.FindCachedCollectionByNameOrId(e.Request.PathValue("collection"))
 		if err != nil || collection == nil {
@@ -441,6 +452,14 @@ func recordUpdate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 		}
 		form.Load(data)
 
+		manageRuleQuery := e.App.ConcurrentDB().Select("(1)").From(collection.Name).AndWhere(dbx.HashExp{
+			collection.Name + ".id": record.Id,
+		})
+		if !form.HasManageAccess() &&
+			hasAuthManageAccess(e.App, requestInfo, collection, manageRuleQuery) {
+			form.GrantManagerAccess()
+		}
+
 		var isOptFinalizerCalled bool
 
 		event := new(core.RecordRequestEvent)
@@ -452,15 +471,6 @@ func recordUpdate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 			form.SetApp(e.App)
 			form.SetRecord(e.Record)
 
-			manageRuleQuery := e.App.DB().Select("(1)").From(e.Collection.Name).AndWhere(dbx.HashExp{
-				// note: use the original record id and not e.Record.Id because the record validations because may get overwritten
-				e.Collection.Name + ".id": e.Record.LastSavedPK(),
-			})
-			if !form.HasManageAccess() &&
-				hasAuthManageAccess(e.App, requestInfo, e.Collection, manageRuleQuery) {
-				form.GrantManagerAccess()
-			}
-
 			err := form.Submit()
 			if err != nil {
 				return firstApiError(err, e.BadRequestError("Failed to update record.", err))
@@ -471,7 +481,9 @@ func recordUpdate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 				return firstApiError(err, e.InternalServerError("Failed to enrich record", err))
 			}
 
-			err = e.JSON(http.StatusOK, e.Record)
+			err = execAfterSuccessTx(responseWriteAfterTx, e.App, func() error {
+				return e.JSON(http.StatusOK, e.Record)
+			})
 			if err != nil {
 				return err
 			}
@@ -501,7 +513,7 @@ func recordUpdate(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 	}
 }
 
-func recordDelete(optFinalizer func(data any) error) func(e *core.RequestEvent) error {
+func recordDelete(responseWriteAfterTx bool, optFinalizer func(data any) error) func(e *core.RequestEvent) error {
 	return func(e *core.RequestEvent) error {
 		collection, err := e.App.FindCachedCollectionByNameOrId(e.Request.PathValue("collection"))
 		if err != nil || collection == nil {
@@ -561,7 +573,9 @@ func recordDelete(optFinalizer func(data any) error) func(e *core.RequestEvent) 
 				return firstApiError(err, e.BadRequestError("Failed to delete record. Make sure that the record is not part of a required relation reference.", err))
 			}
 
-			err = e.NoContent(http.StatusNoContent)
+			err = execAfterSuccessTx(responseWriteAfterTx, e.App, func() error {
+				return e.NoContent(http.StatusNoContent)
+			})
 			if err != nil {
 				return err
 			}

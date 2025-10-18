@@ -13,6 +13,12 @@ import (
 func TestS3URL(t *testing.T) {
 	t.Parallel()
 
+	path := "/test_key/a/b c@d?a=@1&b=!2#@a b c"
+
+	// note: query params and fragments are kept as it is
+	// since they are later escaped if necessery by the Go HTTP client
+	expectedPath := "/test_key/a/b%20c%40d?a=@1&b=!2#@a b c"
+
 	scenarios := []struct {
 		name     string
 		s3Client *s3.S3
@@ -27,7 +33,7 @@ func TestS3URL(t *testing.T) {
 				AccessKey: "123",
 				SecretKey: "abc",
 			},
-			"https://test_bucket.example.com/test_key/a/b/c?q=1",
+			"https://test_bucket.example.com" + expectedPath,
 		},
 		{
 			"with https schema",
@@ -38,7 +44,7 @@ func TestS3URL(t *testing.T) {
 				AccessKey: "123",
 				SecretKey: "abc",
 			},
-			"https://test_bucket.example.com/test_key/a/b/c?q=1",
+			"https://test_bucket.example.com" + expectedPath,
 		},
 		{
 			"with http schema",
@@ -49,7 +55,7 @@ func TestS3URL(t *testing.T) {
 				AccessKey: "123",
 				SecretKey: "abc",
 			},
-			"http://test_bucket.example.com/test_key/a/b/c?q=1",
+			"http://test_bucket.example.com" + expectedPath,
 		},
 		{
 			"path style addressing (non-explicit schema)",
@@ -61,7 +67,7 @@ func TestS3URL(t *testing.T) {
 				SecretKey:    "abc",
 				UsePathStyle: true,
 			},
-			"https://example.com/test_bucket/test_key/a/b/c?q=1",
+			"https://example.com/test_bucket" + expectedPath,
 		},
 		{
 			"path style addressing (explicit schema)",
@@ -73,13 +79,13 @@ func TestS3URL(t *testing.T) {
 				SecretKey:    "abc",
 				UsePathStyle: true,
 			},
-			"http://example.com/test_bucket/test_key/a/b/c?q=1",
+			"http://example.com/test_bucket" + expectedPath,
 		},
 	}
 
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
-			result := s.s3Client.URL("/test_key/a/b/c?q=1")
+			result := s.s3Client.URL(path)
 			if result != s.expected {
 				t.Fatalf("Expected URL\n%s\ngot\n%s", s.expected, result)
 			}
@@ -98,11 +104,13 @@ func TestS3SignAndSend(t *testing.T) {
 
 	scenarios := []struct {
 		name     string
+		path     string
 		reqFunc  func(req *http.Request)
 		s3Client *s3.S3
 	}{
 		{
 			"minimal",
+			"/test",
 			func(req *http.Request) {
 				req.Header.Set("x-amz-date", "20250102T150405Z")
 			},
@@ -129,6 +137,7 @@ func TestS3SignAndSend(t *testing.T) {
 		},
 		{
 			"minimal with different access and secret keys",
+			"/test",
 			func(req *http.Request) {
 				req.Header.Set("x-amz-date", "20250102T150405Z")
 			},
@@ -154,7 +163,35 @@ func TestS3SignAndSend(t *testing.T) {
 			},
 		},
 		{
+			"minimal with special characters",
+			"/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -_.~!@&*():=$()?a=1&@b=@2#@a b c",
+			func(req *http.Request) {
+				req.Header.Set("x-amz-date", "20250102T150405Z")
+			},
+			&s3.S3{
+				Region:    "test_region",
+				Bucket:    "test_bucket",
+				Endpoint:  "https://example.com/",
+				AccessKey: "456",
+				SecretKey: "def",
+				Client: tests.NewClient(&tests.RequestStub{
+					Method:   http.MethodGet,
+					URL:      "https://test_bucket.example.com/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%20-_.~%21%40%26%2A%28%29%3A%3D%24%28%29?a=1&@b=@2#@a%20b%20c",
+					Response: testResponse(),
+					Match: func(req *http.Request) bool {
+						return tests.ExpectHeaders(req.Header, map[string]string{
+							"Authorization":        "AWS4-HMAC-SHA256 Credential=456/20250102/test_region/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=9458a033554f52913801b3de16f54409b36ed25c6da3aed14e64439500e2c5e1",
+							"Host":                 "test_bucket.example.com",
+							"X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+							"X-Amz-Date":           "20250102T150405Z",
+						})
+					},
+				}),
+			},
+		},
+		{
 			"with extra headers",
+			"/test",
 			func(req *http.Request) {
 				req.Header.Set("x-amz-date", "20250102T150405Z")
 				req.Header.Set("x-amz-content-sha256", "test_sha256")
@@ -191,7 +228,7 @@ func TestS3SignAndSend(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, s.s3Client.URL("/test"), strings.NewReader("test_request"))
+			req, err := http.NewRequest(http.MethodGet, s.s3Client.URL(s.path), strings.NewReader("test_request"))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -29,12 +29,14 @@ func collectionsImport(e *core.RequestEvent) error {
 	return event.App.OnCollectionsImportRequest().Trigger(event, func(e *core.CollectionsImportRequestEvent) error {
 		importErr := e.App.ImportCollections(e.CollectionsData, form.DeleteMissing)
 		if importErr == nil {
-			return e.NoContent(http.StatusNoContent)
+			return execAfterSuccessTx(true, e.App, func() error {
+				return e.NoContent(http.StatusNoContent)
+			})
 		}
 
 		// validation failure
 		var validationErrors validation.Errors
-		if errors.As(err, &validationErrors) {
+		if errors.As(importErr, &validationErrors) {
 			return e.BadRequestError("Failed to import collections.", validationErrors)
 		}
 

@@ -1012,18 +1012,21 @@ func TestCollectionModelEventSync(t *testing.T) {
 
 	changeCollectionEventBefore := func(e *core.CollectionEvent) {
 		e.Type = "test_b"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 123)
 		e.Collection = testCollections[1]
 	}
 
 	modelEventFinalizerChange := func(e *core.ModelEvent) {
 		e.Type = "test_c"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 456)
 		e.Model = testCollections[2]
 	}
 
 	changeCollectionEventAfter := func(e *core.CollectionEvent) {
 		e.Type = "test_d"
+		//nolint:staticcheck
 		e.Context = context.WithValue(context.Background(), "test", 789)
 		e.Collection = testCollections[3]
 	}
@@ -1620,7 +1623,7 @@ func TestCollectionSaveViewWrapping(t *testing.T) {
 
 			var sql string
 
-			rowErr := app.DB().NewQuery("SELECT sql FROM sqlite_master WHERE type='view' AND name={:name}").
+			rowErr := app.ConcurrentDB().NewQuery("SELECT sql FROM sqlite_master WHERE type='view' AND name={:name}").
 				Bind(dbx.Params{"name": viewName}).
 				Row(&sql)
 			if rowErr != nil {

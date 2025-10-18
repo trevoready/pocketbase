@@ -1,7 +1,6 @@
 package apis_test
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -82,7 +81,7 @@ func TestRecordAuthWithPassword(t *testing.T) {
 			ExpectedEvents: map[string]int{"*": 0},
 		},
 		{
-			Name:   "OnRecordAuthWithPasswordRequest error response",
+			Name:   "OnRecordAuthWithPasswordRequest tx body write check",
 			Method: http.MethodPost,
 			URL:    "/api/collections/clients/auth-with-password",
 			Body: strings.NewReader(`{
@@ -91,15 +90,22 @@ func TestRecordAuthWithPassword(t *testing.T) {
 			}`),
 			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
 				app.OnRecordAuthWithPasswordRequest().BindFunc(func(e *core.RecordAuthWithPasswordRequestEvent) error {
-					return errors.New("error")
+					original := e.App
+					return e.App.RunInTransaction(func(txApp core.App) error {
+						e.App = txApp
+						defer func() { e.App = original }()
+
+						if err := e.Next(); err != nil {
+							return err
+						}
+
+						return e.BadRequestError("TX_ERROR", nil)
+					})
 				})
 			},
 			ExpectedStatus:  400,
-			ExpectedContent: []string{`"data":{}`},
-			ExpectedEvents: map[string]int{
-				"*":                               0,
-				"OnRecordAuthWithPasswordRequest": 1,
-			},
+			ExpectedEvents:  map[string]int{"OnRecordAuthWithPasswordRequest": 1},
+			ExpectedContent: []string{"TX_ERROR"},
 		},
 		{
 			Name:   "valid identity field and invalid password",
@@ -181,6 +187,57 @@ func TestRecordAuthWithPassword(t *testing.T) {
 			ExpectedContent: []string{
 				`"email":"test@example.com"`,
 				`"username":"clients57772"`,
+				`"token":`,
+			},
+			NotExpectedContent: []string{
+				// hidden fields
+				`"tokenKey"`,
+				`"password"`,
+			},
+			ExpectedEvents: map[string]int{
+				"*":                               0,
+				"OnRecordAuthWithPasswordRequest": 1,
+				"OnRecordAuthRequest":             1,
+				"OnRecordEnrich":                  1,
+				// authOrigin track
+				"OnModelCreate":               1,
+				"OnModelCreateExecute":        1,
+				"OnModelAfterCreateSuccess":   1,
+				"OnModelValidate":             1,
+				"OnRecordCreate":              1,
+				"OnRecordCreateExecute":       1,
+				"OnRecordAfterCreateSuccess":  1,
+				"OnRecordValidate":            1,
+				"OnMailerSend":                1,
+				"OnMailerRecordAuthAlertSend": 1,
+			},
+		},
+		{
+			// https://github.com/pocketbase/pocketbase/issues/7256
+			Name:   "valid non-email identity field with a value that is a properly formatted email",
+			Method: http.MethodPost,
+			URL:    "/api/collections/clients/auth-with-password",
+			Body: strings.NewReader(`{
+				"identity":"username_as_email@example.com",
+				"password":"1234567890"
+			}`),
+			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+				record, err := app.FindAuthRecordByEmail("clients", "test@example.com")
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				record.Set("username", "username_as_email@example.com")
+
+				err = app.SaveNoValidate(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+			},
+			ExpectedStatus: 200,
+			ExpectedContent: []string{
+				`"email":"test@example.com"`,
+				`"username":"username_as_email@example.com"`,
 				`"token":`,
 			},
 			NotExpectedContent: []string{

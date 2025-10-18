@@ -743,11 +743,12 @@ export default class CommonHelper {
     /**
      * Returns a concatenated `items` string.
      *
-     * @param  {String} items
-     * @param  {String} [separator]
+     * @param  {String}  items
+     * @param  {String}  [separator]
+     * @param  {Boolean} [escapeSeparator]
      * @return {Array}
      */
-    static joinNonEmpty(items, separator = ", ") {
+    static joinNonEmpty(items, separator = ", ", escapeSeparator = true) {
         items = items || [];
 
         const result = [];
@@ -756,9 +757,16 @@ export default class CommonHelper {
 
         for (let item of items) {
             item = typeof item === "string" ? item.trim() : "";
-            if (!CommonHelper.isEmpty(item)) {
-                result.push(item.replaceAll(trimmedSeparator, "\\" + trimmedSeparator));
+
+            if (CommonHelper.isEmpty(item)) {
+                continue;
             }
+
+            if (escapeSeparator) {
+                item = item.replaceAll(trimmedSeparator, "\\" + trimmedSeparator);
+            }
+
+            result.push(item);
         }
 
         return result.join(separator);
@@ -1127,6 +1135,8 @@ export default class CommonHelper {
                 if (field?.maxSelect != 1) {
                     val = [val];
                 }
+            } else if (field.type == "geoPoint") {
+                val = {"lon": 0, "lat": 0};
             } else {
                 val = "test";
             }
@@ -1161,7 +1171,7 @@ export default class CommonHelper {
      * @return {String}
      */
     static getFieldTypeIcon(type) {
-        switch (type?.toLowerCase()) {
+        switch (type) {
             case "primary":
                 return "ri-key-line";
             case "text":
@@ -1190,6 +1200,8 @@ export default class CommonHelper {
                 return "ri-lock-password-line";
             case "autodate":
                 return "ri-calendar-check-line";
+            case "geoPoint":
+                return "ri-map-pin-2-line";
             default:
                 return "ri-star-s-line";
         }
@@ -1203,20 +1215,22 @@ export default class CommonHelper {
      */
     static getFieldValueType(field) {
         switch (field?.type) {
-            case 'bool':
-                return 'Boolean';
-            case 'number':
-                return 'Number';
-            case 'file':
-                return 'File';
-            case 'select':
-            case 'relation':
+            case "bool":
+                return "Boolean";
+            case "number":
+                return "Number";
+            case "geoPoint":
+                return "Object";
+            case "file":
+                return "File";
+            case "select":
+            case "relation":
                 if (field?.maxSelect == 1) {
-                    return 'String';
+                    return "String";
                 }
-                return 'Array<String>';
+                return "Array<String>";
             default:
-                return 'String';
+                return "String";
         }
     }
 
@@ -1233,6 +1247,10 @@ export default class CommonHelper {
 
         if (field?.type === "bool") {
             return "false";
+        }
+
+        if (field?.type === "geoPoint") {
+            return '{"lon":0,"lat":0}';
         }
 
         if (field?.type === "json") {
@@ -1404,6 +1422,7 @@ export default class CommonHelper {
             disableMobile: true,
             allowInput: true,
             enableTime: true,
+            enableSeconds: true,
             time_24hr: true,
             locale: {
                 firstDayOfWeek: 1,
@@ -1774,7 +1793,12 @@ export default class CommonHelper {
 
         const fields = collection.fields || [];
         for (const field of fields) {
-            CommonHelper.pushUnique(result, prefix + field.name);
+            if (field.type == "geoPoint") {
+                CommonHelper.pushUnique(result, prefix + field.name + ".lon");
+                CommonHelper.pushUnique(result, prefix + field.name + ".lat");
+            } else {
+                CommonHelper.pushUnique(result, prefix + field.name);
+            }
         }
 
         return result;
